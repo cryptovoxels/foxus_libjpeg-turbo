@@ -1280,6 +1280,9 @@ DLLEXPORT int tjDecompressToYUV2(tjhandle handle, const unsigned char *jpegBuf,
                                  unsigned long jpegSize, unsigned char *dstBuf,
                                  int width, int pad, int height, int flags);
 
+DLLEXPORT int tjDecompressToYUV3(tjhandle handle, const unsigned char *jpegBuf,
+                                 unsigned long jpegSize, unsigned char *dstBuf,
+                                 int width, int pad, int height, int crop_x, int crop_width, int flags);
 
 /**
  * Decompress a JPEG image into separate Y, U (Cb), and V (Cr) image
@@ -1339,6 +1342,11 @@ DLLEXPORT int tjDecompressToYUVPlanes(tjhandle handle,
                                       unsigned char **dstPlanes, int width,
                                       int *strides, int height, int flags);
 
+DLLEXPORT int tjDecompressToYUVPlanesWithCrop(tjhandle handle,
+                                      const unsigned char *jpegBuf,
+                                      unsigned long jpegSize,
+                                      unsigned char **dstPlanes, int width,
+                                      int *strides, int height, int flags, int crop_x, int crop_width);
 
 /**
  * Decode a YUV planar image into an RGB or grayscale image.  This function

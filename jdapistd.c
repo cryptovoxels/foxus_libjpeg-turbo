@@ -161,8 +161,8 @@ jpeg_crop_scanline(j_decompress_ptr cinfo, JDIMENSION *xoffset,
   jpeg_component_info *compptr;
   my_master_ptr master = (my_master_ptr)cinfo->master;
 
-  if (cinfo->global_state != DSTATE_SCANNING || cinfo->output_scanline != 0)
-    ERREXIT1(cinfo, JERR_BAD_STATE, cinfo->global_state);
+  // if (cinfo->global_state != DSTATE_SCANNING || cinfo->output_scanline != 0)
+  //   ERREXIT1(cinfo, JERR_BAD_STATE, cinfo->global_state);
 
   if (!xoffset || !width)
     ERREXIT(cinfo, JERR_BAD_CROP_SPEC);

@@ -1632,6 +1632,15 @@ DLLEXPORT int tjDecompressToYUVPlanes(tjhandle handle,
                                       unsigned char **dstPlanes, int width,
                                       int *strides, int height, int flags)
 {
+  return tjDecompressToYUVPlanesWithCrop(handle, jpegBuf, jpegSize, dstPlanes, width, strides, height, flags, 0, 0);
+}
+
+DLLEXPORT int tjDecompressToYUVPlanesWithCrop(tjhandle handle,
+                                      const unsigned char *jpegBuf,
+                                      unsigned long jpegSize,
+                                      unsigned char **dstPlanes, int width,
+                                      int *strides, int height, int flags, int crop_x, int crop_width)
+{
   int i, sfi, row, retval = 0;
   int jpegwidth, jpegheight, jpegSubsamp, scaledw, scaledh;
   int pw[MAX_COMPONENTS], ph[MAX_COMPONENTS], iw[MAX_COMPONENTS],
@@ -1706,6 +1715,10 @@ DLLEXPORT int tjDecompressToYUVPlanes(tjhandle handle,
   sfi = i;
   jpeg_calc_output_dimensions(dinfo);
 
+  if (crop_x >= 0 && crop_width > 0) {
+    jpeg_crop_scanline(dinfo, &crop_x, &crop_width);
+  }
+
   dctsize = DCTSIZE * sf[sfi].num / sf[sfi].denom;
 
   for (i = 0; i < dinfo->num_components; i++) {
@@ -1751,6 +1764,11 @@ DLLEXPORT int tjDecompressToYUVPlanes(tjhandle handle,
   dinfo->raw_data_out = TRUE;
 
   jpeg_start_decompress(dinfo);
+
+  if (crop_x >= 0 && crop_width > 0) {
+    jpeg_crop_scanline(dinfo, &crop_x, &crop_width);
+  }
+
   for (row = 0; row < (int)dinfo->output_height;
        row += dinfo->max_v_samp_factor * dinfo->_min_DCT_scaled_size) {
     JSAMPARRAY yuvptr[MAX_COMPONENTS];
@@ -1810,6 +1828,13 @@ DLLEXPORT int tjDecompressToYUV2(tjhandle handle, const unsigned char *jpegBuf,
                                  unsigned long jpegSize, unsigned char *dstBuf,
                                  int width, int pad, int height, int flags)
 {
+  return tjDecompressToYUV3(handle, jpegBuf, jpegSize, dstBuf, width, pad, height, 0, 0, flags);
+}
+
+DLLEXPORT int tjDecompressToYUV3(tjhandle handle, const unsigned char *jpegBuf,
+                                 unsigned long jpegSize, unsigned char *dstBuf,
+                                 int width, int pad, int height, int crop_x, int crop_width, int flags)
+{
   unsigned char *dstPlanes[3];
   int pw0, ph0, strides[3], retval = -1, jpegSubsamp = -1;
   int i, jpegwidth, jpegheight, scaledw, scaledh;
@@ -1836,6 +1861,8 @@ DLLEXPORT int tjDecompressToYUV2(tjhandle handle, const unsigned char *jpegBuf,
   if (width == 0) width = jpegwidth;
   if (height == 0) height = jpegheight;
 
+  int output_width = crop_width > 0 ? crop_width : width;
+  
   for (i = 0; i < NUMSF; i++) {
     scaledw = TJSCALED(jpegwidth, sf[i]);
     scaledh = TJSCALED(jpegheight, sf[i]);
@@ -1845,7 +1872,8 @@ DLLEXPORT int tjDecompressToYUV2(tjhandle handle, const unsigned char *jpegBuf,
   if (i >= NUMSF)
     THROW("tjDecompressToYUV2(): Could not scale down to desired image dimensions");
 
-  pw0 = tjPlaneWidth(0, width, jpegSubsamp);
+
+  pw0 = tjPlaneWidth(0, output_width, jpegSubsamp);
   ph0 = tjPlaneHeight(0, height, jpegSubsamp);
   dstPlanes[0] = dstBuf;
   strides[0] = PAD(pw0, pad);
@@ -1853,7 +1881,7 @@ DLLEXPORT int tjDecompressToYUV2(tjhandle handle, const unsigned char *jpegBuf,
     strides[1] = strides[2] = 0;
     dstPlanes[1] = dstPlanes[2] = NULL;
   } else {
-    int pw1 = tjPlaneWidth(1, width, jpegSubsamp);
+    int pw1 = tjPlaneWidth(1, output_width, jpegSubsamp);
     int ph1 = tjPlaneHeight(1, height, jpegSubsamp);
 
     strides[1] = strides[2] = PAD(pw1, pad);
@@ -1862,8 +1890,8 @@ DLLEXPORT int tjDecompressToYUV2(tjhandle handle, const unsigned char *jpegBuf,
   }
 
   this->headerRead = 1;
-  return tjDecompressToYUVPlanes(handle, jpegBuf, jpegSize, dstPlanes, width,
-                                 strides, height, flags);
+  return tjDecompressToYUVPlanesWithCrop(handle, jpegBuf, jpegSize, dstPlanes, width,
+                                 strides, height, flags, crop_x, crop_width);
 
 bailout:
   this->jerr.stopOnWarning = FALSE;
