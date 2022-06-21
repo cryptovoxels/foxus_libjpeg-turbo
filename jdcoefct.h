@@ -19,7 +19,6 @@
 #undef BLOCK_SMOOTHING_SUPPORTED
 #endif
 
-
 /* Private buffer controller object */
 
 typedef struct {
@@ -81,3 +80,7 @@ start_iMCU_row(j_decompress_ptr cinfo)
   coef->MCU_ctr = 0;
   coef->MCU_vert_offset = 0;
 }
+
+EXTERN(void) idct_init(j_decompress_ptr cinfo);
+
+EXTERN(void) idct_destroy(j_decompress_ptr cinfo);

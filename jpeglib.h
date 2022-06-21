@@ -30,7 +30,6 @@
 #endif
 #include "jmorecfg.h"           /* seldom changed options */
 
-
 #ifdef __cplusplus
 #ifndef DONT_USE_EXTERN_C
 extern "C" {
@@ -467,6 +466,17 @@ struct jpeg_compress_struct {
 };
 
 
+struct idct_ctx {
+  int finish;
+
+  JBLOCKROW MCU_buffer[D_MAX_BLOCKS_IN_MCU];
+  JDIMENSION MCU_col_num;
+  JDIMENSION last_MCU_col;
+  JSAMPIMAGE output_buf;
+  int yoffset;
+  JDIMENSION last_iMCU_row;
+};
+
 /* Master record for a decompression instance */
 
 struct jpeg_decompress_struct {
@@ -704,6 +714,8 @@ struct jpeg_decompress_struct {
   struct jpeg_upsampler *upsample;
   struct jpeg_color_deconverter *cconvert;
   struct jpeg_color_quantizer *cquantize;
+
+  struct jpeg_idct_data *idct_data;
 };
 
 

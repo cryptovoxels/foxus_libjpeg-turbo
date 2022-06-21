@@ -23,6 +23,21 @@
 #include "jdcoefct.h"
 #include "jpegcomp.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
+
+#include "cprofiler.h"
+
+#define idct_queue_size 500
+
+struct jpeg_idct_data {
+  pthread_t idct_thread;
+  atomic_int idct_queue_begin_idx;
+  atomic_int idct_queue_end_idx;
+  struct idct_ctx idct_queue[idct_queue_size];
+  atomic_int idct_stop;
+  atomic_int idct_finish;
+};
 
 /* Forward declarations */
 METHODDEF(int) decompress_onepass(j_decompress_ptr cinfo,
@@ -36,6 +51,133 @@ METHODDEF(int) decompress_smooth_data(j_decompress_ptr cinfo,
                                       JSAMPIMAGE output_buf);
 #endif
 
+LOCAL(int) idct_queue_is_full(j_decompress_ptr cinfo) {
+  return (atomic_load(&cinfo->idct_data->idct_queue_begin_idx) + 1) % idct_queue_size == atomic_load(&cinfo->idct_data->idct_queue_end_idx);
+}
+
+LOCAL(int) idct_queue_is_empty(j_decompress_ptr cinfo) {
+  return atomic_load(&cinfo->idct_data->idct_queue_begin_idx) == atomic_load(&cinfo->idct_data->idct_queue_end_idx);
+}
+
+LOCAL(void) idct_queue_map(j_decompress_ptr cinfo, struct idct_ctx **ctx) {
+  while (idct_queue_is_full(cinfo)) { }
+  *ctx = &cinfo->idct_data->idct_queue[cinfo->idct_data->idct_queue_begin_idx];
+}
+
+LOCAL(void) idct_queue_unmap(j_decompress_ptr cinfo, struct idct_ctx **ctx) {
+  *ctx = NULL;
+  atomic_store(&cinfo->idct_data->idct_queue_begin_idx, (atomic_load(&cinfo->idct_data->idct_queue_begin_idx) + 1) % idct_queue_size);
+}
+
+LOCAL(void) idct_wait_for_finish(j_decompress_ptr cinfo) {
+  int expected;
+  do {
+    expected = 1;
+  } while (!atomic_compare_exchange_weak(&cinfo->idct_data->idct_finish, &expected, 0));
+}
+
+LOCAL(void) idct_process(j_decompress_ptr cinfo, struct idct_ctx *ctx) {
+  if (ctx->finish) {
+    atomic_store(&cinfo->idct_data->idct_finish, 1);
+    return;
+  }
+
+  /* Only perform the IDCT on blocks that are contained within the desired
+   * cropping region.
+   */
+  if (ctx->MCU_col_num >= cinfo->master->first_iMCU_col &&
+      ctx->MCU_col_num <= cinfo->master->last_iMCU_col) {
+
+    CPROFILER_TRACE_EVENT("inverse_DCT");
+
+    /* Determine where data should go in output_buf and do the IDCT thing.
+     * We skip dummy blocks at the right and bottom edges (but blkn gets
+     * incremented past them!).  Note the inner loop relies on having
+     * allocated the MCU_buffer[] blocks sequentially.
+     */
+    my_coef_ptr coef = (my_coef_ptr)cinfo->coef;
+    int blkn = 0;               /* index of current DCT block within MCU */
+    int useful_width, xindex, yindex;
+    jpeg_component_info *compptr;
+    inverse_DCT_method_ptr inverse_DCT;
+    JSAMPARRAY output_ptr;
+    JDIMENSION start_col, output_col;
+    for (int ci = 0; ci < cinfo->comps_in_scan; ci++) {
+      compptr = cinfo->cur_comp_info[ci];
+      /* Don't bother to IDCT an uninteresting component. */
+      if (!compptr->component_needed) {
+        blkn += compptr->MCU_blocks;
+        continue;
+      }
+      inverse_DCT = cinfo->idct->inverse_DCT[compptr->component_index];
+      useful_width = (ctx->MCU_col_num < ctx->last_MCU_col) ?
+                     compptr->MCU_width : compptr->last_col_width;
+      output_ptr = ctx->output_buf[compptr->component_index] +
+                   ctx->yoffset * compptr->_DCT_scaled_size;
+      start_col = (ctx->MCU_col_num - cinfo->master->first_iMCU_col) *
+                  compptr->MCU_sample_width;
+      for (yindex = 0; yindex < compptr->MCU_height; yindex++) {
+        if (cinfo->input_iMCU_row < ctx->last_iMCU_row ||
+            ctx->yoffset + yindex < compptr->last_row_height) {
+          output_col = start_col;
+          for (xindex = 0; xindex < useful_width; xindex++) {
+            (*inverse_DCT) (cinfo, compptr,
+                            (JCOEFPTR)ctx->MCU_buffer[blkn + xindex],
+                            output_ptr, output_col);
+            output_col += compptr->_DCT_scaled_size;
+          }
+        }
+        blkn += compptr->MCU_width;
+        output_ptr += compptr->_DCT_scaled_size;
+      }
+    }
+  }
+
+}
+
+LOCAL(void*) idct_processor(void *data) {
+  j_decompress_ptr cinfo = (j_decompress_ptr)data;
+  while (!atomic_load(&cinfo->idct_data->idct_stop)) {
+    while (!idct_queue_is_empty(cinfo)) {
+      struct idct_ctx* ctx = &cinfo->idct_data->idct_queue[atomic_load(&cinfo->idct_data->idct_queue_end_idx)];
+      idct_process(cinfo, ctx);
+      atomic_store(&cinfo->idct_data->idct_queue_end_idx, (atomic_load(&cinfo->idct_data->idct_queue_end_idx) + 1) % idct_queue_size);
+    }
+  }
+  return NULL;
+}
+
+LOCAL(void) idct_queue_init(j_decompress_ptr cinfo) {
+  atomic_store(&cinfo->idct_data->idct_queue_begin_idx, 0);
+  atomic_store(&cinfo->idct_data->idct_queue_end_idx, 0);
+  atomic_store(&cinfo->idct_data->idct_stop, 0);
+  atomic_store(&cinfo->idct_data->idct_finish, 0);
+}
+
+LOCAL(void) idct_queue_alloc(j_decompress_ptr cinfo) {
+  for (int j = 0; j < idct_queue_size; j++) {
+    JBLOCKROW buffer = (JBLOCKROW)
+    (*cinfo->mem->alloc_large) ((j_common_ptr)cinfo, JPOOL_PERMANENT,
+                                D_MAX_BLOCKS_IN_MCU * sizeof(JBLOCK));
+    for (int i = 0; i < D_MAX_BLOCKS_IN_MCU; i++) {
+      cinfo->idct_data->idct_queue[j].MCU_buffer[i] = buffer + i;
+    }
+  }
+}
+
+GLOBAL(void) idct_init(j_decompress_ptr cinfo) {
+  cinfo->idct_data = (struct jpeg_idct_data*)malloc(sizeof(struct jpeg_idct_data));
+  idct_queue_alloc(cinfo);
+  idct_queue_init(cinfo);
+  pthread_create(&cinfo->idct_data->idct_thread, NULL, idct_processor, (void*)cinfo);
+}
+
+GLOBAL(void) idct_destroy(j_decompress_ptr cinfo) {
+  atomic_store(&cinfo->idct_data->idct_stop, 1);
+  pthread_join(cinfo->idct_data->idct_thread, NULL);
+  free(cinfo->idct);
+  cinfo->idct = NULL;
+}
 
 /*
  * Initialize for an input processing pass.
@@ -99,63 +241,43 @@ decompress_onepass(j_decompress_ptr cinfo, JSAMPIMAGE output_buf)
        yoffset++) {
     for (MCU_col_num = coef->MCU_ctr; MCU_col_num <= last_MCU_col;
          MCU_col_num++) {
+
+      CPROFILER_TRACE_EVENT("decode_MCU");
+
+      struct idct_ctx *ctx;
+      idct_queue_map(cinfo, &ctx);
+
       /* Try to fetch an MCU.  Entropy decoder expects buffer to be zeroed. */
-      jzero_far((void *)coef->MCU_buffer[0],
+      jzero_far((void *)ctx->MCU_buffer[0],
                 (size_t)(cinfo->blocks_in_MCU * sizeof(JBLOCK)));
       if (!cinfo->entropy->insufficient_data)
         cinfo->master->last_good_iMCU_row = cinfo->input_iMCU_row;
-      if (!(*cinfo->entropy->decode_mcu) (cinfo, coef->MCU_buffer)) {
+      if (!(*cinfo->entropy->decode_mcu) (cinfo, ctx->MCU_buffer)) {
         /* Suspension forced; update state counters and exit */
         coef->MCU_vert_offset = yoffset;
         coef->MCU_ctr = MCU_col_num;
         return JPEG_SUSPENDED;
       }
 
-      /* Only perform the IDCT on blocks that are contained within the desired
-       * cropping region.
-       */
-      if (MCU_col_num >= cinfo->master->first_iMCU_col &&
-          MCU_col_num <= cinfo->master->last_iMCU_col) {
-        /* Determine where data should go in output_buf and do the IDCT thing.
-         * We skip dummy blocks at the right and bottom edges (but blkn gets
-         * incremented past them!).  Note the inner loop relies on having
-         * allocated the MCU_buffer[] blocks sequentially.
-         */
-        blkn = 0;               /* index of current DCT block within MCU */
-        for (ci = 0; ci < cinfo->comps_in_scan; ci++) {
-          compptr = cinfo->cur_comp_info[ci];
-          /* Don't bother to IDCT an uninteresting component. */
-          if (!compptr->component_needed) {
-            blkn += compptr->MCU_blocks;
-            continue;
-          }
-          inverse_DCT = cinfo->idct->inverse_DCT[compptr->component_index];
-          useful_width = (MCU_col_num < last_MCU_col) ?
-                         compptr->MCU_width : compptr->last_col_width;
-          output_ptr = output_buf[compptr->component_index] +
-                       yoffset * compptr->_DCT_scaled_size;
-          start_col = (MCU_col_num - cinfo->master->first_iMCU_col) *
-                      compptr->MCU_sample_width;
-          for (yindex = 0; yindex < compptr->MCU_height; yindex++) {
-            if (cinfo->input_iMCU_row < last_iMCU_row ||
-                yoffset + yindex < compptr->last_row_height) {
-              output_col = start_col;
-              for (xindex = 0; xindex < useful_width; xindex++) {
-                (*inverse_DCT) (cinfo, compptr,
-                                (JCOEFPTR)coef->MCU_buffer[blkn + xindex],
-                                output_ptr, output_col);
-                output_col += compptr->_DCT_scaled_size;
-              }
-            }
-            blkn += compptr->MCU_width;
-            output_ptr += compptr->_DCT_scaled_size;
-          }
-        }
-      }
+      ctx->finish = 0;
+      ctx->MCU_col_num = MCU_col_num;
+      ctx->last_MCU_col = last_MCU_col;
+      ctx->output_buf = output_buf;
+      ctx->yoffset = yoffset;
+      ctx->last_iMCU_row = last_iMCU_row;
+      idct_queue_unmap(cinfo, &ctx);
     }
     /* Completed an MCU row, but perhaps not an iMCU row */
     coef->MCU_ctr = 0;
   }
+
+  struct idct_ctx *ctx;
+  idct_queue_map(cinfo, &ctx);
+  ctx->finish = 1;
+  idct_queue_unmap(cinfo, &ctx);
+
+  idct_wait_for_finish(cinfo);
+
   /* Completed the iMCU row, advance counters for next one */
   cinfo->output_iMCU_row++;
   if (++(cinfo->input_iMCU_row) < cinfo->total_iMCU_rows) {

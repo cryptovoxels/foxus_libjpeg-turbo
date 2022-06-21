@@ -24,6 +24,7 @@
 #include "jpeglib.h"
 #include "jdmaster.h"
 #include "jconfigint.h"
+#include "jdcoefct.h"
 
 
 /*
@@ -93,6 +94,7 @@ jpeg_CreateDecompress(j_decompress_ptr cinfo, int version, size_t structsize)
     (*cinfo->mem->alloc_small) ((j_common_ptr)cinfo, JPOOL_PERMANENT,
                                 sizeof(my_decomp_master));
   memset(cinfo->master, 0, sizeof(my_decomp_master));
+  idct_init(cinfo);
 }
 
 
@@ -103,6 +105,7 @@ jpeg_CreateDecompress(j_decompress_ptr cinfo, int version, size_t structsize)
 GLOBAL(void)
 jpeg_destroy_decompress(j_decompress_ptr cinfo)
 {
+  idct_destroy(cinfo);
   jpeg_destroy((j_common_ptr)cinfo); /* use common routine */
 }
 

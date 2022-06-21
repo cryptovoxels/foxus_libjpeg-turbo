@@ -55,6 +55,9 @@ message(STATUS "VERSION = ${VERSION}, BUILD = ${BUILD}")
 
 include(cmakescripts/PackageInfo.cmake)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Detect CPU type and whether we're building 64-bit or 32-bit code
 math(EXPR BITS "${CMAKE_SIZEOF_VOID_P} * 8")
 string(TOLOWER ${CMAKE_SYSTEM_PROCESSOR} CMAKE_SYSTEM_PROCESSOR_LC)
@@ -185,6 +188,8 @@ option(ENABLE_SHARED "Build shared libraries" TRUE)
 boolean_number(ENABLE_SHARED)
 option(ENABLE_STATIC "Build static libraries" TRUE)
 boolean_number(ENABLE_STATIC)
+option(ENABLE_PERFETTO "Enable perfetto" FALSE)
+boolean_number(ENABLE_PERFETTO)
 option(REQUIRE_SIMD "Generate a fatal error if SIMD extensions are not available for this platform (default is to fall back to a non-SIMD build)" FALSE)
 boolean_number(REQUIRE_SIMD)
 option(WITH_12BIT "Encode/decode JPEG images with 12-bit samples (implies WITH_ARITH_DEC=0 WITH_ARITH_ENC=0 WITH_JAVA=0 WITH_SIMD=0 WITH_TURBOJPEG=0 )" FALSE)
@@ -221,6 +226,10 @@ endmacro()
 
 if(WITH_JAVA)
   set(ENABLE_SHARED 1)
+endif()
+
+if(ENABLE_PERFETTO)
+  add_definitions(-DENABLE_PERFETTO)
 endif()
 
 # Explicitly setting CMAKE_POSITION_INDEPENDENT_CODE=FALSE disables PIC for all
@@ -526,7 +535,7 @@ if(UNIX)
 endif()
 
 # Include directories and compiler definitions
-include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../foxus_profiler/include)
 
 
 ###############################################################################
@@ -592,6 +601,7 @@ if(ENABLE_STATIC)
   if(NOT MSVC)
     set_target_properties(jpeg-static PROPERTIES OUTPUT_NAME jpeg)
   endif()
+  target_link_libraries(jpeg-static PRIVATE Threads::Threads)
 endif()
 
 if(WITH_TURBOJPEG)
@@ -614,12 +624,14 @@ if(WITH_TURBOJPEG)
     add_library(turbojpeg SHARED ${TURBOJPEG_SOURCES})
     set_property(TARGET turbojpeg PROPERTY COMPILE_FLAGS
       "-DBMP_SUPPORTED -DPPM_SUPPORTED")
+    target_include_directories(turbojpeg-static PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../foxus_profiler/include)
     if(WIN32)
       set_target_properties(turbojpeg PROPERTIES DEFINE_SYMBOL DLLDEFINE)
     endif()
     if(MINGW)
       set_target_properties(turbojpeg PROPERTIES LINK_FLAGS -Wl,--kill-at)
     endif()
+    target_link_libraries(turbojpeg PRIVATE Threads::Threads)
     if(APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET OR
                   CMAKE_OSX_DEPLOYMENT_TARGET VERSION_GREATER 10.4))
       if(NOT CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG)
@@ -657,15 +669,17 @@ if(WITH_TURBOJPEG)
       set_target_properties(turbojpeg-static PROPERTIES OUTPUT_NAME turbojpeg)
     endif()
 
-    add_executable(tjunittest-static tjunittest.c tjutil.c md5/md5.c
-      md5/md5hl.c)
-    target_link_libraries(tjunittest-static turbojpeg-static)
+    target_link_libraries(turbojpeg-static PRIVATE Threads::Threads)
 
-    add_executable(tjbench-static tjbench.c tjutil.c)
-    target_link_libraries(tjbench-static turbojpeg-static)
-    if(UNIX)
-      target_link_libraries(tjbench-static m)
-    endif()
+#    add_executable(tjunittest-static tjunittest.c tjutil.c md5/md5.c
+#      md5/md5hl.c)
+#    target_link_libraries(tjunittest-static turbojpeg-static)
+
+#    add_executable(tjbench-static tjbench.c tjutil.c)
+#    target_link_libraries(tjbench-static turbojpeg-static)
+#    if(UNIX)
+#      target_link_libraries(tjbench-static m)
+#    endif()
   endif()
 endif()
 
@@ -680,21 +694,21 @@ else()
   set(DJPEG_BMP_SOURCES wrbmp.c wrtarga.c)
 endif()
 
-if(ENABLE_STATIC)
-  add_executable(cjpeg-static cjpeg.c cdjpeg.c rdgif.c rdppm.c rdswitch.c
-    ${CJPEG_BMP_SOURCES})
-  set_property(TARGET cjpeg-static PROPERTY COMPILE_FLAGS ${COMPILE_FLAGS})
-  target_link_libraries(cjpeg-static jpeg-static)
-
-  add_executable(djpeg-static djpeg.c cdjpeg.c rdcolmap.c rdswitch.c wrgif.c
-    wrppm.c ${DJPEG_BMP_SOURCES})
-  set_property(TARGET djpeg-static PROPERTY COMPILE_FLAGS ${COMPILE_FLAGS})
-  target_link_libraries(djpeg-static jpeg-static)
-
-  add_executable(jpegtran-static jpegtran.c cdjpeg.c rdswitch.c transupp.c)
-  target_link_libraries(jpegtran-static jpeg-static)
-  set_property(TARGET jpegtran-static PROPERTY COMPILE_FLAGS "${USE_SETMODE}")
-endif()
+#if(ENABLE_STATIC)
+#  add_executable(cjpeg-static cjpeg.c cdjpeg.c rdgif.c rdppm.c rdswitch.c
+#    ${CJPEG_BMP_SOURCES})
+#  set_property(TARGET cjpeg-static PROPERTY COMPILE_FLAGS ${COMPILE_FLAGS})
+#  target_link_libraries(cjpeg-static jpeg-static)
+#
+#  add_executable(djpeg-static djpeg.c cdjpeg.c rdcolmap.c rdswitch.c wrgif.c
+#    wrppm.c ${DJPEG_BMP_SOURCES})
+#  set_property(TARGET djpeg-static PROPERTY COMPILE_FLAGS ${COMPILE_FLAGS})
+#  target_link_libraries(djpeg-static jpeg-static)
+#
+#  add_executable(jpegtran-static jpegtran.c cdjpeg.c rdswitch.c transupp.c)
+#  target_link_libraries(jpegtran-static jpeg-static)
+#  set_property(TARGET jpegtran-static PROPERTY COMPILE_FLAGS "${USE_SETMODE}")
+#endif()
 
 add_executable(rdjpgcom rdjpgcom.c)
 
@@ -1454,8 +1468,8 @@ if(WITH_TURBOJPEG)
       else()
         set(DIR ${CMAKE_CURRENT_BINARY_DIR})
       endif()
-      install(PROGRAMS ${DIR}/tjbench-static${EXE}
-        DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME tjbench${EXE})
+#      install(PROGRAMS ${DIR}/tjbench-static${EXE}
+#        DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME tjbench${EXE})
     endif()
   endif()
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/turbojpeg.h
@@ -1472,12 +1486,12 @@ if(ENABLE_STATIC)
     else()
       set(DIR ${CMAKE_CURRENT_BINARY_DIR})
     endif()
-    install(PROGRAMS ${DIR}/cjpeg-static${EXE}
-      DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME cjpeg${EXE})
-    install(PROGRAMS ${DIR}/djpeg-static${EXE}
-      DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME djpeg${EXE})
-    install(PROGRAMS ${DIR}/jpegtran-static${EXE}
-      DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME jpegtran${EXE})
+#    install(PROGRAMS ${DIR}/cjpeg-static${EXE}
+#      DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME cjpeg${EXE})
+#    install(PROGRAMS ${DIR}/djpeg-static${EXE}
+#      DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME djpeg${EXE})
+#    install(PROGRAMS ${DIR}/jpegtran-static${EXE}
+#      DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME jpegtran${EXE})
   endif()
 endif()
 
